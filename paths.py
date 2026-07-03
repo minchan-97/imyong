@@ -26,3 +26,5 @@ def som_path(subject): return _p(f"{subject}_som.pkl")
 
 def exists(path):
     return os.path.exists(path)
+
+def study_path(subject): return _p(f"{subject}_study.pkl")
