@@ -142,3 +142,55 @@ if __name__ == "__main__":
     if probs:
         print("\n=== reveal 예시(첫 문제 해설+출처) ===")
         print(json.dumps(probs[0].reveal(), ensure_ascii=False, indent=2))
+
+
+# ══════════════════════════════════════════════════════════════
+# 채점: 내 답 vs 모범답안 (LLM) + 정합도 보조신호
+# ══════════════════════════════════════════════════════════════
+def grade_answer_llm(question, my_answer, grounding, api_key, model="gpt-4o-mini"):
+    """
+    LLM으로 내 답을 채점 '제안'한다(최종 확정은 사용자).
+    grounding(근거 자료)을 채점 기준으로 준다 → 근거 밖 잣대 억제.
+    반환: dict(suggest: correct/partial/wrong, feedback, model_answer)
+    """
+    import json
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+    grounds = "\n".join(f"- {g['내용']} (출처:{g['출처']})" for g in grounding)
+    prompt = (
+        "너는 초등 임용 국어 서술형 채점 보조자다.\n"
+        "아래 '근거 자료'를 기준으로 학생 답안을 채점 '제안'하라.\n"
+        "논리·핵심개념 포함 여부를 보고, 개념어만 겹친다고 정답 처리하지 말 것.\n\n"
+        f"[문제]\n{question}\n\n[근거 자료]\n{grounds}\n\n[학생 답안]\n{my_answer}\n\n"
+        "출력(JSON): {\"suggest\":\"correct|partial|wrong\","
+        "\"feedback\":\"무엇이 맞고 무엇이 빠졌는지 2~3줄\","
+        "\"model_answer\":\"근거에 기반한 모범답안\"}"
+    )
+    resp = client.chat.completions.create(
+        model=model, messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+    )
+    txt = resp.choices[0].message.content
+    try:
+        d = json.loads(txt)
+    except Exception:
+        d = {"suggest": "partial", "feedback": txt, "model_answer": ""}
+    return d
+
+
+def grade_answer_offline(my_answer, emb, som, node):
+    """
+    LLM 없을 때: 내 답을 임베딩해 해당 개념영역(node)과의 유사도로
+    '제안'만 한다. (개념어 겹침 수준 — 참고용임을 명시)
+    """
+    import numpy as np
+    from korean_tokenizer import tokenize
+    v = emb.embed_tokens(tokenize(my_answer))
+    if v is None:
+        return {"suggest": "wrong", "feedback": "개념 어휘가 거의 없음(참고용)",
+                "model_answer": "", "score": 0.0}
+    score = float(som.W[node] @ v)
+    suggest = "correct" if score >= 0.55 else ("partial" if score >= 0.4 else "wrong")
+    return {"suggest": suggest,
+            "feedback": f"개념영역 유사도 {score:.2f} (※논리 채점 아님, 참고용)",
+            "model_answer": "", "score": round(score, 3)}
