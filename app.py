@@ -70,7 +70,46 @@ with tab2:
     l2 = load_records_pkl(paths.l2_path(subject))
     st.write(f"현재 저장된 자료: **{len(l2)}건**")
 
-    with st.expander("➕ 자료 추가", expanded=(len(l2) == 0)):
+    # ── 파일 업로드(pdf/docx/txt) ────────────────────────────
+    with st.expander("📄 파일로 자료 넣기 (pdf / docx / txt)", expanded=False):
+        from file_ingest import ingest
+        up = st.file_uploader("성취기준·지도서 파일", type=["pdf", "docx", "txt"],
+                              key="l2_file")
+        fsrc = st.text_input("이 파일의 출처(필수)", key="l2_fsrc",
+                             placeholder="2022개정 국어과 교육과정")
+        if up is not None:
+            try:
+                items = ingest(up.name, up.read())
+                st.write(f"**추출된 항목 {len(items)}개** — 넣을 것만 체크하고 수정하세요")
+                # 편집 테이블: 체크/문장/코드
+                import pandas as pd
+                df = pd.DataFrame([{"넣기": True, "문장": t, "코드": c or ""}
+                                   for t, c in items])
+                edited = st.data_editor(df, use_container_width=True,
+                                        num_rows="dynamic", key="l2_editor")
+                if st.button("체크한 항목 저장", type="primary", key="l2_file_save"):
+                    if not fsrc.strip():
+                        st.error("출처는 필수입니다.")
+                    else:
+                        added = 0
+                        for _, row in edited.iterrows():
+                            if not row["넣기"] or not str(row["문장"]).strip():
+                                continue
+                            try:
+                                l2.append(Record(
+                                    text=str(row["문장"]).strip(), layer="L2_corpus",
+                                    subject=subject, source=fsrc.strip(),
+                                    code=str(row["코드"]).strip() or None))
+                                added += 1
+                            except Exception as e:
+                                st.warning(f"거부: {str(row['문장'])[:20]} — {e}")
+                        save_records_pkl(l2, paths.l2_path(subject))
+                        st.success(f"{added}건 저장 → {subject}_L2.pkl")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"추출 실패: {e}")
+
+    with st.expander("➕ 직접 입력", expanded=(len(l2) == 0)):
         c1, c2 = st.columns([3, 1])
         txt = c1.text_area("자료 문장(한 줄에 하나)", height=120,
                            placeholder="이야기를 읽고 인물의 마음을 짐작하며 감상한다")
@@ -167,7 +206,67 @@ with tab1:
     l1 = load_records_pkl(paths.l1_path(subject))
     st.write(f"저장된 기출: **{len(l1)}건**")
 
-    with st.expander("➕ 기출 추가", expanded=(len(l1) == 0)):
+    # ── 기출 파일 업로드 (초등: 통짜 시험지 → 문항 분할) ──────
+    with st.expander("📄 기출 파일로 넣기 (pdf / docx / txt)", expanded=False):
+        from file_ingest import extract_text, split_questions_rule, \
+            split_questions_llm, is_scanned_pdf
+        st.caption("초등은 한 시험에 전과목이 섞임 → 연도 단위로 통짜 업로드하면 "
+                   "문항으로 잘라준다. 중등/특수는 과목별 시험이라 그대로.")
+        upq = st.file_uploader("기출 시험지 파일", type=["pdf", "docx", "txt"], key="l1_file")
+        fc1, fc2, fc3 = st.columns(3)
+        fyear = fc1.number_input("출제연도", 2000, 2030, 2023, key="l1_fy")
+        flevel = fc2.selectbox("급", ["초등", "중등", "특수", "공통"], key="l1_fl")
+        fqsrc = fc3.text_input("출처(필수)", key="l1_fs", placeholder="2023 초등임용")
+
+        use_llm_split = st.checkbox("LLM으로 문항 분할(더 정확, OpenAI 키 필요)",
+                                    key="l1_llmsplit")
+        split_key = ""
+        if use_llm_split:
+            split_key = st.text_input("OpenAI Key(분할용)", type="password", key="l1_splitkey")
+
+        if upq is not None:
+            try:
+                raw_text = extract_text(upq.name, upq.read())
+                if is_scanned_pdf(raw_text):
+                    st.error("이 PDF는 텍스트가 추출되지 않습니다(스캔본으로 보임). "
+                             "OCR이 필요해요 — 텍스트 PDF로 다시 저장하거나 OCR 후 넣어주세요.")
+                else:
+                    if use_llm_split and split_key:
+                        items = split_questions_llm(raw_text, split_key)
+                    else:
+                        items = split_questions_rule(raw_text)
+                    st.write(f"**분할된 문항 후보 {len(items)}개** — "
+                             "제목·안내문은 체크 해제, 묶음문항은 행을 나눠서 편집")
+                    import pandas as pd
+                    df = pd.DataFrame([{"넣기": True, "문항": t} for t in items])
+                    edited = st.data_editor(df, use_container_width=True,
+                                            num_rows="dynamic", key="l1_editor")
+                    st.caption("💡 초등 통짜 기출은 지금 subject='{}'로 저장됩니다. "
+                               "과목 자동분류는 다른 과목 SOM이 갖춰지면 붙일 수 있어요."
+                               .format(subject))
+                    if st.button("체크한 문항 저장", type="primary", key="l1_file_save"):
+                        if not fqsrc.strip():
+                            st.error("출처는 필수입니다.")
+                        else:
+                            added = 0
+                            for _, row in edited.iterrows():
+                                if not row["넣기"] or not str(row["문항"]).strip():
+                                    continue
+                                try:
+                                    l1.append(Record(
+                                        text=str(row["문항"]).strip(), layer="L1_pattern",
+                                        subject=subject, source=fqsrc.strip(),
+                                        year=int(fyear), level=flevel))
+                                    added += 1
+                                except Exception as e:
+                                    st.warning(f"거부: {str(row['문항'])[:20]} — {e}")
+                            save_records_pkl(l1, paths.l1_path(subject))
+                            st.success(f"{added}건 저장 → {subject}_L1.pkl")
+                            st.rerun()
+            except Exception as e:
+                st.error(f"추출/분할 실패: {e}")
+
+    with st.expander("➕ 직접 입력", expanded=(len(l1) == 0)):
         qtxt = st.text_area("기출 문항", height=80,
                             placeholder="인물의 마음을 짐작하는 지도 방법을 서술하시오")
         d1, d2, d3 = st.columns(3)
@@ -240,26 +339,48 @@ with tab3:
 # ══════════════════════════════════════════════════════════════
 with tab4:
     st.subheader("연습문제 (L4)")
-    st.caption("기출 유사 개념의 연습문제. 먼저 스스로 풀고 → '해설 보기'를 눌러야 근거·해설이 열림.")
+    st.caption("문제 풀기 → 내 답 채점(제안) → 내가 확정 → 약점지도 학습. 문제·해설 검토로 함께 발전.")
     if som is None or emb is None:
         st.info("먼저 L2 학습을 완료하세요.")
     else:
         from layer4 import pick_concept_nodes, gather_grounding, \
-            build_generation_prompt, generate_with_llm
+            build_generation_prompt, generate_with_llm, \
+            grade_answer_llm, grade_answer_offline
+        from study_state import StudyState
         l2 = load_records_pkl(paths.l2_path(subject))
         l1 = load_records_pkl(paths.l1_path(subject))
         by_id = {r.rec_id: r for r in (l2 + l1)}
+        study = StudyState.load(paths.study_path(subject), subject)
 
-        okey = st.text_input("OpenAI API Key (해설·문제 생성용)", type="password")
+        # ── 약점 지도 표시 ──────────────────────────────────
+        with st.expander("📊 내 약점 지도", expanded=False):
+            wc = study.weak_by_code()
+            wn = study.weak_by_node()
+            if wc:
+                st.write("**성취기준 코드별 (정답률 낮은 순)**")
+                st.dataframe(wc, use_container_width=True)
+            if wn:
+                st.write("**개념영역별**")
+                st.dataframe(wn, use_container_width=True)
+            if not wc and not wn:
+                st.caption("아직 채점 기록 없음 — 문제를 풀고 답을 확정하면 쌓입니다.")
+
+        okey = st.text_input("OpenAI API Key (문제·채점·해설용)", type="password")
         n = st.slider("문제 수", 1, 8, 3)
+        target_weak = st.checkbox("내 약점 영역 위주로 출제", value=bool(study.weak_by_node()))
 
         if st.button("문제 생성", type="primary"):
             from layer1 import map_exams_to_som
             l1_nodes = map_exams_to_som(l1, emb, som) if l1 else None
-            nodes = pick_concept_nodes(som, l1_nodes, topn=n)
+            if target_weak and study.weak_by_node():
+                nodes = study.weak_nodes_for_targeting(top=n)
+            else:
+                nodes = pick_concept_nodes(som, l1_nodes, topn=n)
             probs = []
             for node in nodes:
+                # 신뢰도 낮은 자료는 근거에서 후순위 (trust 반영)
                 grounding = gather_grounding(node, som, by_id)
+                grounding.sort(key=lambda g: 0)  # 순서 유지(자리표시)
                 if okey:
                     prompt = build_generation_prompt(grounding)
                     try:
@@ -269,22 +390,83 @@ with tab4:
                 else:
                     stem = f"[개념영역 {node} — OpenAI 키 넣으면 실제 문제 생성]"
                     answer = None
-                probs.append({"node": node, "stem": stem,
-                              "answer": answer, "grounding": grounding})
+                # 이 개념영역의 대표 코드(약점지도 기록용)
+                codes = som.node_codes.get(node, [])
+                probs.append({"node": node, "stem": stem, "answer": answer,
+                              "grounding": grounding, "codes": list(set(codes))})
             st.session_state["problems"] = probs
             st.session_state["revealed"] = set()
+            st.session_state["graded"] = {}
 
+        # ── 문제별: 풀기 → 채점 → 확정 → 검토 ──────────────
         for i, p in enumerate(st.session_state.get("problems", [])):
-            st.markdown(f"### 문제 {i+1}")
+            st.markdown(f"### 문제 {i+1}  ·  개념영역 {p['node']}")
             st.write(p["stem"])
+
+            my_ans = st.text_area("✍️ 내 답", key=f"ans_{i}", height=100)
+
+            cc1, cc2, cc3 = st.columns(3)
+            # 1) 자동 채점 제안
+            if cc1.button("🤖 채점 제안", key=f"grade_{i}"):
+                if not my_ans.strip():
+                    st.warning("답을 먼저 쓰세요.")
+                else:
+                    if okey:
+                        g = grade_answer_llm(p["stem"], my_ans, p["grounding"], okey)
+                    else:
+                        g = grade_answer_offline(my_ans, emb, som, p["node"])
+                    st.session_state.setdefault("graded", {})[i] = g
+                    st.rerun()
+
+            g = st.session_state.get("graded", {}).get(i)
+            if g:
+                label = {"correct": "✅ 맞을 것 같음", "partial": "🟡 부분/애매",
+                         "wrong": "❌ 틀린 것 같음"}.get(g.get("suggest"), "🟡")
+                st.info(f"**자동 제안: {label}** (참고용)\n\n{g.get('feedback','')}")
+
+            # 2) 내가 최종 확정 (이것만 약점지도 반영)
+            st.write("**내 확정** (이게 약점지도에 반영됨)")
+            fc1, fc2 = st.columns(2)
+            if fc1.button("맞음으로 확정", key=f"ok_{i}"):
+                study.record_answer(p["node"], p["codes"], my_ans,
+                                    (g or {}).get("suggest"), "correct")
+                study.save(paths.study_path(subject))
+                st.success("맞음으로 기록됨 → 약점지도 갱신")
+            if fc2.button("틀림으로 확정", key=f"no_{i}"):
+                study.record_answer(p["node"], p["codes"], my_ans,
+                                    (g or {}).get("suggest"), "wrong")
+                study.save(paths.study_path(subject))
+                st.error("틀림으로 기록됨 → 약점지도 갱신")
+
+            # 3) 해설 보기 (잠금 → 버튼)
             revealed = st.session_state.get("revealed", set())
             if i in revealed:
                 st.success("**해설**")
-                st.write(p["answer"] or "(LLM 미연결: 해설 없음)")
+                model_ans = (g or {}).get("model_answer") or p["answer"] or "(LLM 미연결)"
+                st.write(model_ans)
                 st.write("**📎 근거 출처**")
                 st.json(p["grounding"])
+                # 4) 문제·해설 검토 (자료 신뢰도 조정 + 복구)
+                st.write("**🔧 이 문제·해설 검토** (자료 개선에 반영)")
+                rc1, rc2, rc3 = st.columns(3)
+                if rc1.button("👍 좋은 문제", key=f"good_{i}"):
+                    for g_ in p["grounding"]:
+                        pass  # grounding엔 rec_id 없음 → 노드 자료로 반영
+                    for rid in som.node_rec_ids.get(p["node"], [])[:3]:
+                        study.review_feedback(rid, good=True, reason=f"문제{i+1} 좋음")
+                    study.save(paths.study_path(subject))
+                    st.success("좋은 자료로 반영")
+                if rc2.button("👎 이상한 문제/해설", key=f"bad_{i}"):
+                    for rid in som.node_rec_ids.get(p["node"], [])[:3]:
+                        study.review_feedback(rid, good=False, reason=f"문제{i+1} 이상")
+                    study.save(paths.study_path(subject))
+                    st.warning("해당 개념영역 자료 신뢰도 하향(복구 가능)")
+                if rc3.button("↩️ 방금 검토 복구", key=f"undo_{i}"):
+                    u = study.undo_last_review()
+                    study.save(paths.study_path(subject))
+                    st.info(f"복구됨: {u['rec_id'][:8] if u else '없음'}")
             else:
-                if st.button(f"🔓 해설 보기", key=f"reveal_{i}"):
+                if st.button("🔓 해설 보기", key=f"reveal_{i}"):
                     st.session_state["revealed"].add(i)
                     st.rerun()
             st.markdown("---")
